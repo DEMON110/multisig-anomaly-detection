@@ -1,0 +1,333 @@
+# =============================================================================
+# Configuration for Ethereum Multisig Anomaly Detection
+# All values match the paper exactly
+# =============================================================================
+
+# Random seeds for reproducibility
+seeds:
+  training: 43
+  evaluation: 123
+  bootstrap: 456
+
+# =============================================================================
+# Dataset Configuration
+# =============================================================================
+dataset:
+  source: "bigquery-public-data.crypto_ethereum.transactions"
+  target_contracts: "Gnosis Safe multisig"
+  period:
+    start: "2023-01-01"
+    end: "2023-12-31"
+  total_samples: 100000
+  temporal_split:
+    train:
+      ratio: 0.60
+      samples: 60000
+      anomalies: 6411
+      benign: 53589
+      prevalence_pct: 10.69
+      block_range: [23586544, 24469834]
+      time_period: "Jan--Aug 2023"
+    validation:
+      ratio: 0.15
+      samples: 15000
+      anomalies: 1151
+      benign: 13849
+      prevalence_pct: 7.67
+      block_range: [24469842, 24663889]
+      time_period: "Aug--Oct 2023"
+    test:
+      ratio: 0.25
+      samples: 25000
+      anomalies: 2280
+      benign: 22720
+      prevalence_pct: 9.12
+      block_range: [24663902, 24881458]
+      time_period: "Oct--Dec 2023"
+
+# =============================================================================
+# Heuristic Labeling Thresholds
+# =============================================================================
+labeling:
+  gas_limit_mad_multiplier: 3.0          # > 3 MAD above training median
+  internal_calls_percentile: 98          # > 98th percentile
+  calldata_length_min: 4                 # < 4 bytes
+  calldata_length_max: 10000             # > 10,000 bytes
+  check_duplicate_nonce: true
+  check_transaction_failure: true        # revert or out-of-gas
+  isolation_forest:
+    enabled: true
+    contamination: 0.1
+    n_estimators: 100
+    random_state: 43
+    usage: "auxiliary signal enhancement only"
+
+# =============================================================================
+# Leakage Prevention: Features Removed (14 total across 5 categories)
+# =============================================================================
+leakage_removed:
+  category_1_identifiers:
+    count: 4
+    features:
+      - transaction_hash
+      - sender_address
+      - target_contract_address
+      - block_hash
+    rationale: "Prevent memorization of specific transactions"
+  category_2_posthoc:
+    count: 5
+    features:
+      - receipt_status
+      - execution_success_indicator
+      - finality_status
+      - internal_errors
+      - internal_gas_usage
+    rationale: "Unavailable at prediction time"
+  category_3_correlated:
+    count: 2
+    features:
+      - gas_limit_zscore_leaky    # computed on full data
+      - duplicate_nonce_flag      # directly encodes target
+    rationale: "Encode target information"
+  category_4_temporal:
+    count: 2
+    features:
+      - nonce_gaps
+      - nonce_sequences
+    rationale: "Leak future context"
+  category_5_hash_derived:
+    count: 1
+    features:
+      - raw_calldata
+    rationale: "Pattern memorization"
+  total_removed: 14
+
+# =============================================================================
+# Features Retained (16 total)
+# =============================================================================
+features:
+  raw_onchain_metrics:
+    - gas_price
+    - gas_limit
+    - calldata_length
+    - eth_value
+    - internal_calls
+    - log_count
+  temporal_indicators:
+    - hour_of_day
+    - day_of_week
+    - is_weekend
+    - is_night
+  normalized_deviation:
+    - gas_price_zscore_clean
+    - gas_limit_zscore_clean
+    - calldata_length_zscore_clean
+    - internal_calls_zscore_clean
+    - log_count_zscore_clean
+  normalization_method: "median_mad"
+  normalization_scope: "train_only"
+
+# Training-set normalization statistics (median, MAD)
+normalization_stats:
+  gas_price:
+    median: 192476370.00
+    mad: 155933567.00
+  gas_limit:
+    median: 141459.00
+    mad: 58788.00
+  calldata_length:
+    median: 1418.00
+    mad: 256.00
+  internal_calls:
+    median: 4.00
+    mad: 1.00
+  log_count:
+    median: 2.00
+    mad: 1.00
+
+# =============================================================================
+# LightGBM Hyperparameters (Exact from Table)
+# =============================================================================
+lightgbm:
+  n_estimators: 1000
+  learning_rate: 0.05
+  max_depth: 8
+  num_leaves: 31
+  subsample: 0.85
+  colsample_bytree: 0.80
+  scale_pos_weight: 8.4        # neg:pos ratio from training set (imbalance 8.4:1)
+  min_child_weight: 5
+  reg_alpha: 0.1               # L1 regularization
+  reg_lambda: 1.0              # L2 regularization
+  random_state: 43
+  eval_metric: "aucpr"
+  early_stopping:
+    enabled: true
+    patience: 50
+    best_iteration: 554         # reported best iteration
+  class_weight: "balanced"
+
+# =============================================================================
+# Baseline Model Configurations
+# =============================================================================
+baselines:
+  xgboost:
+    n_estimators: 1000
+    learning_rate: 0.05
+    max_depth: 8
+    subsample: 0.85
+    colsample_bytree: 0.80
+    scale_pos_weight: 8.4
+    random_state: 43
+  random_forest:
+    n_estimators: 500
+    max_depth: 20
+    class_weight: "balanced"
+    random_state: 43
+  isolation_forest:
+    n_estimators: 100
+    contamination: 0.1
+    random_state: 43
+  mlp:
+    hidden_layers: [256, 128, 64]
+    activation: "relu"
+    batch_size: 1024
+    learning_rate: 0.001
+    optimizer: "adam"
+    early_stopping_patience: 30
+    random_state: 43
+  graphsage:
+    k: 10                        # k-NN graph
+    distance_metric: "euclidean"
+    hidden_units: 64
+    num_layers: 2
+    aggregation: "mean"
+    learning_rate: 0.005
+    weight_decay: 0.0001
+    early_stopping_patience: 30
+    pos_weight: 8.4
+    random_state: 43
+  gat:
+    k: 10
+    distance_metric: "euclidean"
+    hidden_units: 64
+    num_layers: 2
+    attention_heads_layer1: 4
+    attention_heads_layer2: 1
+    learning_rate: 0.005
+    weight_decay: 0.0001
+    early_stopping_patience: 30
+    pos_weight: 8.4
+    random_state: 43
+  logistic_regression:
+    penalty: "l2"
+    C: 1.0
+    class_weight: "balanced"
+    max_iter: 1000
+    random_state: 43
+
+# =============================================================================
+# Evaluation Protocol
+# =============================================================================
+evaluation:
+  metrics:
+    - roc_auc
+    - pr_auc
+    - f1_score
+    - accuracy
+    - precision
+    - recall
+    - mcc                         # Matthews Correlation Coefficient
+  bootstrap:
+    enabled: true
+    n_iterations: 1000            # B = 1000
+    confidence_level: 0.95
+    method: "percentile"
+    ci_lower_percentile: 2.5
+    ci_upper_percentile: 97.5
+  statistical_tests:
+    paired_t_test:
+      enabled: true
+      alternative: "greater"
+      alpha: 0.05
+    bonferroni_correction:
+      enabled: true
+      m: 7                         # 7 comparisons (LightGBM vs each baseline)
+      alpha_adjusted: 0.007142857 # 0.05 / 7 ≈ 0.007
+    wilcoxon_test:
+      enabled: true
+      alternative: "greater"
+
+# =============================================================================
+# Temporal Validation
+# =============================================================================
+temporal_validation:
+  method: "block_height"
+  strict_separation: true
+  random_split_baseline:
+    enabled: true
+  observed_inflation:
+    auc_difference: 0.0017        # 0.9988 - 0.9971 = 0.0017 (0.17%)
+    f1_difference: 0.0064         # 0.9803 - 0.9739 = 0.0064 (0.65%)
+  distribution_drift:
+    eth_value_pct: 92.8
+    gas_price_pct: 58.2
+
+# =============================================================================
+# Hybrid Anomaly Scoring
+# =============================================================================
+hybrid_scoring:
+  enabled: true
+  lambda: 0.7                   # balance between model and statistical deviation
+  feature_weights:
+    z_gas: 0.4
+    z_calls: 0.35
+    z_logs: 0.25
+  threshold_tau:
+    default: 0.5
+    optimal_f1: 0.799           # for ablation Level 2
+
+# =============================================================================
+# Stress Testing
+# =============================================================================
+stress_test:
+  gaussian_noise:
+    sigma_levels: [0.0, 0.02, 0.05, 0.10, 0.20]
+    noise_source: "test_set_statistics"
+  additional_scenarios:
+    - gas_spike_simulation
+    - nonce_jitter
+    - proof_delay
+
+# =============================================================================
+# SHAP Explainability
+# =============================================================================
+shap:
+  explainer: "TreeExplainer"
+  global_method: "mean_absolute"
+  local_method: "waterfall"
+  max_display: 20
+
+# =============================================================================
+# Forensic Validation
+# =============================================================================
+forensic:
+  corpus_size: 12
+  total_losses_usd: 286141000
+  sources:
+    - Rekt News
+    - QuillAudits
+    - SlowMist
+    - ImmuneBytes
+    - Halborn
+    - Numen Cyber
+  attack_categories:
+    - Flash-Loan Reentrancy
+    - Bad Callback / Arbitrary Transfer
+    - Misconfiguration / Flash Loan
+    - Read-Only Reentrancy / Oracle Manipulation
+    - Tick Manipulation / Double Liquidity
+    - Precision Loss / Index Manipulation
+    - Malicious Approval / Phishing
+    - Asset Transfer
+  scoring_threshold_percentile: 96   # all 12 scored > 96th percentile
